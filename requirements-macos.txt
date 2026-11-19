@@ -1,0 +1,6 @@
+# Versions verified end-to-end on Apple M5 / macOS 26 with Metal (MPS).
+torch==2.12.0
+torchvision==0.27.0
+numpy>=1.24
+Pillow>=9.0
+tqdm>=4.65
