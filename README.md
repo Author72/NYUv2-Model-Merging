@@ -10,6 +10,9 @@ It implements:
 1. Three single-task experts (STL).
 2. One shared-encoder multi-task model (MTL).
 3. Direct arithmetic averaging of the three STL encoders, while retaining each expert's task-specific head.
+4. Optional task-head distillation on a held-out calibration split.
+5. Encoder averaging plus intermediate-feature and output distillation.
+6. Encoder averaging plus pure teacher-output distillation.
 
 ## 1. Dataset
 
@@ -98,6 +101,66 @@ on MPS.
 
 ## 4. Run the complete first benchmark
 
+### Five methods, three random seeds, 100 epochs
+
+For the final five-method comparison, use the resumable multi-seed runner.
+It trains STL, MTL, encoder averaging, encoder averaging plus output
+distillation, and encoder averaging plus layer3/layer4 intermediate-feature
+and output distillation. All trained methods use the same 100-epoch budget,
+the same 10% calibration split, and the same ImageNet-pretrained encoder
+initialization.
+
+| Reported method | Implementation |
+|---|---|
+| STL | `train.py --mode stl --task {segmentation,depth,normal}` |
+| MTL | `train.py --mode mtl` |
+| EncoderAvg | `merge_average.py` |
+| EncoderAvg+OutputKD | `distill_heads.py --train_scope heads` with teacher output losses |
+| EncoderAvg+IntermediateKD+OutputKD | `distill_heads.py --train_scope encoder_heads --encoder_layers layer3,layer4` with layer3/layer4 feature losses plus teacher output losses |
+
+```bash
+/Users/dell/miniconda3/envs/cellpose/bin/python \
+  run_three_seed_benchmark.py \
+  --data_root /Users/dell/Projects/nyuv2 \
+  --output_root ./runs_three_seed_100ep \
+  --seeds 8394,4197,9424 \
+  --init_encoder ./runs_full_ds5_seed0/init_encoder.pth \
+  --epochs 100 --distill_epochs 100 \
+  --batch_size 8 --lr 4e-4 --device mps
+```
+
+The seeds in this command were randomly sampled from `1..9999` with
+`secrets.SystemRandom`. Each seed is written to its own subdirectory. Stage
+logs and completion markers allow an interrupted suite to resume without
+retraining completed stages.
+
+The two distillation methods use calibration images but no calibration labels.
+They do not recalibrate BN statistics, which keeps the comparison focused on
+teacher-output and intermediate-feature distillation. The intermediate method
+unfreezes only `layer3` and `layer4`.
+
+The final files are:
+
+```text
+runs_three_seed_100ep/
+├── experiment_manifest.json
+├── all_seed_results.csv
+├── aggregate_results.csv
+├── aggregate_results.json
+├── three_seed_report.md
+└── seed_<seed>/
+    ├── benchmark_results.csv
+    ├── benchmark_task_results.csv
+    ├── logs/
+    └── .completed/
+```
+
+`benchmark_results.csv` contains one row per method with Seg mIoU, Seg Pix Acc,
+Depth Abs, Depth Rel, Normal Mean, Normal Median, and Δm%. The cross-seed
+report contains mean ± sample standard deviation.
+
+### Single-run benchmark
+
 **Apple Silicon mode (recommended):** defaults to automatic MPS selection, FP16
 autocast, batch size 4, learning rate 2e-4, zero DataLoader workers, six
 PyTorch CPU threads, normal process priority, validation every two epochs, and
@@ -134,11 +197,15 @@ DEVICE=cuda GPU_MEMORY_FRACTION=0.20 \
 ```
 
 The script performs, in order:
+- Create or reuse a deterministic 10% calibration split from the training data.
 - STL segmentation training
 - STL depth training
 - STL normal training
 - MTL training
 - encoder arithmetic averaging
+- optional encoder BatchNorm calibration and three-head distillation
+- pure teacher-output distillation without calibration labels
+- layer3/layer4 intermediate-feature distillation plus output distillation
 - validation evaluation and CSV export
 
 Outputs:
@@ -151,7 +218,73 @@ runs/
 ├── stl_normal/best.pth
 ├── mtl/best.pth
 ├── merged_average.pth
+├── merged_distilled.pth
+├── merged_output_distilled.pth
+├── merged_intermediate_distilled.pth
+├── calibration_split.json
 └── benchmark_results.csv
+```
+
+The calibration images are excluded from all teacher and MTL training runs.
+Head distillation freezes the averaged encoder and optimizes only the three
+expert heads using:
+
+- segmentation teacher logits plus supervised cross entropy;
+- depth teacher Smooth-L1 plus masked supervised loss;
+- normal teacher cosine loss plus masked supervised loss.
+
+The intermediate-feature method starts from the same averaged encoder, unfreezes
+only `layer3` and `layer4`, and additionally aligns normalized layer3/layer4
+features with each task's STL teacher:
+
+```text
+L = mean(output KD tasks)
+  + intermediate_weight * mean_feature_cosine_loss(layer3, layer4)
+```
+
+The pure output-distillation method keeps the averaged encoder and BN statistics
+fixed, trains only task heads, and does not use calibration labels. It is useful
+when teacher predictions are available but labels are limited.
+
+Useful environment variables:
+
+```bash
+CALIBRATION_FRACTION=0.10 \
+DISTILL_EPOCHS=100 \
+DISTILL_LR=1e-3 \
+DISTILL_BATCH_SIZE=4 \
+  bash run_first_benchmark.sh /absolute/path/to/nyuv2 ./runs_m5
+```
+
+The same script also runs the intermediate-feature variant. Relevant controls:
+
+```bash
+INTERMEDIATE_DISTILL_EPOCHS=100
+INTERMEDIATE_WEIGHT=0.2
+ENCODER_DISTILL_LR=1e-4
+OUTPUT_DISTILL_EPOCHS=100
+OUTPUT_DISTILL_LR=1e-3
+```
+
+Generate a split manually:
+
+```bash
+python make_calibration_split.py \
+  --data_root /absolute/path/to/nyuv2 \
+  --out ./splits/nyuv2_seed0_10pct.json \
+  --fraction 0.10
+```
+
+Run only head distillation after teachers and `merged_average.pth` exist:
+
+```bash
+python distill_heads.py \
+  --data_root /absolute/path/to/nyuv2 \
+  --run_dir ./runs \
+  --split_manifest ./splits/nyuv2_seed0_10pct.json \
+  --merged ./runs/merged_average.pth \
+  --out ./runs/merged_distilled.pth \
+  --epochs 10 --batch_size 4 --lr 1e-3
 ```
 
 Resume behavior: rerunning the script currently restarts training and overwrites checkpoints. It reuses the common initial encoder checkpoint. Copy the `runs` directory before a new seed/setting.
@@ -207,6 +340,15 @@ python evaluate.py --data_root /path/to/nyuv2 --run_dir ./runs \
 - Normal uses masked cosine loss; zero normal vectors are treated as invalid.
 - Evaluation reports mIoU / pixel accuracy, depth absolute / relative error, and normal angular metrics.
 - The merged model averages floating-point encoder state entries (including BatchNorm running statistics). Integer buffers such as `num_batches_tracked` use elementwise maximum. Each task head is copied from its corresponding STL expert.
+- Head distillation optionally recalibrates encoder BatchNorm statistics on the
+  calibration split, then freezes the encoder and optimizes only task heads.
+- Intermediate/output distillation unfreezes only encoder layer3/layer4 at a
+  lower encoder learning rate.
+- `evaluate.py --distilled ...` includes optional task-head KD in the
+  per-task diagnostic CSV.
+- `evaluate.py --output_distilled ...` adds `EncoderAvg+OutputKD`.
+- `evaluate.py --intermediate_distilled ...` adds
+  `EncoderAvg+IntermediateKD+OutputKD`.
 
 ## 7. Research caveats (read before reporting results)
 
@@ -228,4 +370,18 @@ This is a **reproducible first baseline implementation**, not a claim of exact n
 | Normal | mean / median angular error | lower |
 | Normal | accuracy below 11.25 / 22.5 / 30 degrees | higher |
 
-The CSV stores one row per method/task. For STL, each task's metric is evaluated using its own specialist. For MTL and WeightAveraging, all three tasks are evaluated from the same multi-head model.
+The main CSV stores one row per method. For STL, each metric is evaluated using
+the corresponding task specialist. For MTL and all fused methods, all three
+tasks are evaluated from the same multi-head model.
+
+Δm% is the mean relative improvement over STL across the six reported metrics:
+
+```text
+higher-is-better metric: (method - STL) / |STL| * 100
+lower-is-better metric:  (STL - method) / |STL| * 100
+Δm% = mean(six normalized metric improvements)
+```
+
+Thus Δm% is positive when a method improves over STL on average across the six
+metrics. The per-task diagnostic CSV retains the broader set of auxiliary
+loss and threshold-accuracy metrics.

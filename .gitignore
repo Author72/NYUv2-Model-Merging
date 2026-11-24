@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Large generated experiment outputs stay local.
+runs/
+runs_*/
+*.pth
+*.pt

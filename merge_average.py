@@ -21,6 +21,17 @@ def main():
     for task in TASKS:
         path = os.path.join(args.run_dir, "stl_" + task, "best.pth")
         ckpts[task] = load_checkpoint(path)
+        if ckpts[task].get("tasks") != [task]:
+            raise RuntimeError(f"{path} is not a {task} STL checkpoint")
+
+    common_config = ckpts[TASKS[0]].get("config", {})
+    for task in TASKS[1:]:
+        config = ckpts[task].get("config", {})
+        for key in ("image_normalization",):
+            if config.get(key) != common_config.get(key):
+                raise RuntimeError(
+                    f"Checkpoint configuration mismatch for {key}: {task}"
+                )
 
     # Checkpoint keys are encoder.* and heads.<task>.*
     enc_states = [ckpts[t]["model"] for t in TASKS]
@@ -62,6 +73,7 @@ def main():
         "model": model.state_dict(),
         "tasks": TASKS,
         "method": "encoder_weight_average",
+        "config": common_config,
         "source_checkpoints": {
             task: os.path.join(args.run_dir, "stl_" + task, "best.pth")
             for task in TASKS

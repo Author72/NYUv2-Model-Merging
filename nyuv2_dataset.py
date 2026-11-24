@@ -14,7 +14,9 @@ class NYUv2(Dataset):
         val/{image,label,depth,normal}/0.npy ...
     image: HxWx3; label: HxW; depth: HxWx1; normal: HxWx3.
     """
-    def __init__(self, root, split="train", image_normalization="imagenet"):
+    def __init__(
+        self, root, split="train", image_normalization="imagenet", indices=None
+    ):
         self.root = os.path.expanduser(root)
         self.split = split
         if image_normalization not in ("imagenet", "none"):
@@ -30,20 +32,29 @@ class NYUv2(Dataset):
                     f"Missing directory: {p}\n"
                     "Expected the preprocessed LibMTL/MTAN NYUv2 directory layout."
                 )
-        self.files = sorted(
+        available = sorted(
             [f for f in os.listdir(os.path.join(self.base, "image")) if f.endswith(".npy")],
             key=lambda x: int(os.path.splitext(x)[0])
         )
-        if not self.files:
+        if not available:
             raise RuntimeError(f"No .npy images found in {os.path.join(self.base, 'image')}")
 
-        # Require contiguous numeric indices because the official preprocessing uses 0.npy...N.npy.
-        indices = [int(os.path.splitext(f)[0]) for f in self.files]
-        if indices != list(range(len(indices))):
+        available_indices = [int(os.path.splitext(f)[0]) for f in available]
+        if available_indices != list(range(len(available_indices))):
             raise RuntimeError(
                 f"{split}/image filenames must be contiguous 0.npy ... N-1.npy; "
-                f"found first/last indices {indices[:3]} ... {indices[-3:]}"
+                f"found first/last indices {available_indices[:3]} ... {available_indices[-3:]}"
             )
+        if indices is None:
+            self.indices = available_indices
+        else:
+            self.indices = [int(index) for index in indices]
+            if len(set(self.indices)) != len(self.indices):
+                raise ValueError(f"{split} indices contain duplicates")
+            invalid = [i for i in self.indices if i not in set(available_indices)]
+            if invalid:
+                raise IndexError(f"{split} indices out of range: {invalid[:10]}")
+        self.files = [f"{index}.npy" for index in self.indices]
 
     def __len__(self):
         return len(self.files)

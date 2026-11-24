@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import random
 import time
@@ -163,6 +164,10 @@ def main():
     p.add_argument("--task", choices=TASKS, default=None, help="Required for STL.")
     p.add_argument("--data_root", required=True)
     p.add_argument("--out_dir", default="./runs")
+    p.add_argument(
+        "--split_manifest", default=None,
+        help="JSON split containing train_pool and val index lists."
+    )
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--workers", type=int, default=0)
@@ -217,13 +222,27 @@ def main():
     )
     os.makedirs(args.out_dir, exist_ok=True)
 
+    train_indices = None
+    val_indices = None
+    if args.split_manifest:
+        with open(args.split_manifest, encoding="utf-8") as handle:
+            split = json.load(handle)
+        train_indices = split["train_pool"]
+        val_indices = split["val"]
+        print(
+            f"[data] train_pool={len(train_indices)} "
+            f"val={len(val_indices)} from {args.split_manifest}"
+        )
+
     train_set = NYUv2(
         args.data_root, "train",
-        image_normalization=args.image_normalization
+        image_normalization=args.image_normalization,
+        indices=train_indices,
     )
     val_set = NYUv2(
         args.data_root, "val",
-        image_normalization=args.image_normalization
+        image_normalization=args.image_normalization,
+        indices=val_indices,
     )
     loader_options = {}
     if args.workers > 0:

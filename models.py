@@ -22,13 +22,15 @@ class ResNet50Encoder(nn.Module):
         self.layer4 = net.layer4
         self.out_channels = 2048
 
-    def forward(self, x):
+    def forward(self, x, return_intermediate=False):
         x = self.stem(x)
         x = self.layer1(x)
         x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        return x
+        layer3 = self.layer3(x)
+        layer4 = self.layer4(layer3)
+        if return_intermediate:
+            return layer4, {"layer3": layer3, "layer4": layer4}
+        return layer4
 
 class ConvBNReLU(nn.Sequential):
     def __init__(self, in_ch, out_ch, kernel=3, padding=1, dilation=1):
@@ -100,3 +102,13 @@ class NYUModel(nn.Module):
             task: self.heads[task](feat, image.shape[-2:])
             for task in self.tasks
         }
+
+    def forward_with_features(self, image):
+        feat, intermediates = self.encoder(
+            image, return_intermediate=True
+        )
+        predictions = {
+            task: self.heads[task](feat, image.shape[-2:])
+            for task in self.tasks
+        }
+        return predictions, intermediates
