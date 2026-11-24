@@ -2,9 +2,8 @@ import contextlib
 import os
 import platform
 
-# Some metric and loss operations are implemented on MPS later than core
-# convolutions. Let unsupported operators run on CPU instead of aborting the
-# whole benchmark.
+# Keep the optional MPS fallback for cross-platform debugging. CUDA is the
+# default production target.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
@@ -23,10 +22,10 @@ def is_mps_available():
 
 def get_device(device_arg):
     if device_arg == "auto":
-        if is_mps_available():
-            return torch.device("mps")
         if torch.cuda.is_available():
             return torch.device("cuda")
+        if is_mps_available():
+            return torch.device("mps")
         return torch.device("cpu")
 
     if device_arg == "mps" and not is_mps_available():
@@ -36,7 +35,11 @@ def get_device(device_arg):
             "or run with --device cpu."
         )
     if device_arg == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available.")
+        raise RuntimeError(
+            "CUDA was requested but is not available. Check the NVIDIA driver, "
+            "CUDA_VISIBLE_DEVICES, and that the installed PyTorch wheel is a "
+            "CUDA build."
+        )
     return torch.device(device_arg)
 
 
@@ -54,8 +57,12 @@ def configure_device(device_arg, cpu_threads, gpu_memory_fraction):
         if not (0.05 <= gpu_memory_fraction <= 1.0):
             raise ValueError("--gpu_memory_fraction must be between 0.05 and 1.0")
         torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction, device)
+        properties = torch.cuda.get_device_properties(device)
         print(
-            f"[resource] CUDA allocator limit: {gpu_memory_fraction:.0%}; "
+            f"[resource] NVIDIA CUDA device={properties.name}; "
+            f"capability={properties.major}.{properties.minor}; "
+            f"memory={properties.total_memory / 1024**3:.1f} GB; "
+            f"allocator_limit={gpu_memory_fraction:.0%}; "
             f"torch_threads={cpu_threads}"
         )
     elif device.type == "mps":
@@ -88,10 +95,36 @@ def synchronize_device(device):
 
 
 def autocast_context(device, enabled):
-    """Use FP16 autocast on MPS while keeping scalar losses in FP32."""
-    if enabled and device.type == "mps":
-        return torch.autocast(device_type="mps", dtype=torch.float16)
+    """Use FP16 autocast on CUDA/MPS while keeping scalar losses in FP32."""
+    if enabled and device.type in ("cuda", "mps"):
+        return torch.autocast(device_type=device.type, dtype=torch.float16)
     return contextlib.nullcontext()
+
+
+class _NoOpGradScaler:
+    """Interface-compatible no-op scaler for CPU/MPS or disabled AMP."""
+
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        return None
+
+    def step(self, optimizer):
+        return optimizer.step()
+
+    def update(self):
+        return None
+
+
+def make_grad_scaler(device, enabled):
+    """Create a CUDA FP16 gradient scaler when required."""
+    if not (enabled and device.type == "cuda"):
+        return _NoOpGradScaler()
+    try:
+        return torch.amp.GradScaler("cuda", enabled=True)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=True)
 
 
 def device_memory_gb(device):

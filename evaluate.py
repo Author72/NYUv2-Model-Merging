@@ -36,12 +36,12 @@ def main():
     p.add_argument("--output_distilled", default=None)
     p.add_argument("--intermediate_distilled", default=None)
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--batch_size", type=int, default=8)
-    p.add_argument("--workers", type=int, default=0)
-    p.add_argument("--device", choices=["cpu", "mps", "cuda", "auto"], default="auto")
-    p.add_argument("--cpu_threads", type=int, default=6)
+    p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--device", choices=["cpu", "mps", "cuda", "auto"], default="cuda")
+    p.add_argument("--cpu_threads", type=int, default=8)
     p.add_argument(
-        "--gpu_memory_fraction", type=float, default=0.25,
+        "--gpu_memory_fraction", type=float, default=0.90,
         help="PyTorch CUDA allocator cap; ignored on CPU and MPS."
     )
     p.add_argument(
@@ -51,7 +51,7 @@ def main():
     )
     p.add_argument(
         "--amp", action=argparse.BooleanOptionalAction, default=True,
-        help="Use FP16 autocast on MPS."
+        help="Use FP16 autocast on CUDA or MPS."
     )
     p.add_argument("--csv", default="./runs/benchmark_results.csv")
     p.add_argument(
@@ -63,7 +63,7 @@ def main():
     device = configure_device(
         args.device, args.cpu_threads, args.gpu_memory_fraction
     )
-    use_amp = args.amp and device.type == "mps"
+    use_amp = args.amp and device.type in ("cuda", "mps")
     print(
         f"[resource] device={device}; threads={args.cpu_threads}; "
         f"batch_size={args.batch_size}; workers={args.workers}; amp={use_amp}"
@@ -76,6 +76,7 @@ def main():
     if args.workers > 0:
         loader_options = {
             "prefetch_factor": 4,
+            "persistent_workers": True,
         }
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,

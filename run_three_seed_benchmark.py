@@ -89,19 +89,22 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--distill_epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument("--eval_batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=4e-4)
     parser.add_argument("--distill_lr", type=float, default=1e-3)
     parser.add_argument("--encoder_distill_lr", type=float, default=1e-4)
     parser.add_argument("--intermediate_weight", type=float, default=0.2)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--val_every", type=int, default=10)
-    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
-        "--device", choices=["cpu", "mps", "cuda", "auto"], default="auto"
+        "--device", choices=["cpu", "mps", "cuda", "auto"], default="cuda"
     )
-    parser.add_argument("--cpu_threads", type=int, default=6)
-    parser.add_argument("--gpu_memory_fraction", type=float, default=0.25)
+    parser.add_argument("--cpu_threads", type=int, default=8)
+    parser.add_argument(
+        "--gpu_memory_fraction", type=float, default=0.90,
+        help="Fraction of the selected NVIDIA GPU's memory allowed by PyTorch."
+    )
     parser.add_argument(
         "--image_normalization",
         choices=["imagenet", "none"],
@@ -146,6 +149,9 @@ def main():
         "distill_learning_rate": args.distill_lr,
         "encoder_distill_learning_rate": args.encoder_distill_lr,
         "device": args.device,
+        "amp": args.amp,
+        "amp_dtype": "float16" if args.amp else None,
+        "gpu_memory_fraction": args.gpu_memory_fraction,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "distillation_protocol": (
             "No calibration labels and no BN recalibration; output KD for "
@@ -160,7 +166,11 @@ def main():
 
     env = os.environ.copy()
     env.update({
+        "PYTHONUNBUFFERED": "1",
         "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+        "PYTORCH_CUDA_ALLOC_CONF": env.get(
+            "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+        ),
         "OMP_NUM_THREADS": str(args.cpu_threads),
         "MKL_NUM_THREADS": str(args.cpu_threads),
         "OPENBLAS_NUM_THREADS": str(args.cpu_threads),

@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Conservative defaults for an Apple Silicon desktop or a shared machine.
+# NVIDIA/Linux defaults. CUDA_VISIBLE_DEVICES can be set by the caller.
 DATA_ROOT=${1:?Usage: bash run_first_benchmark.sh /absolute/path/to/nyuv2 [run_dir]}
-RUN_DIR=${2:-./runs_m5}
+RUN_DIR=${2:-./runs_nvidia}
+PYTHON_BIN=${PYTHON_BIN:-python}
 EPOCHS=${EPOCHS:-100}
-BATCH_SIZE=${BATCH_SIZE:-4}
-EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-8}
-WORKERS=${WORKERS:-0}
-DEVICE=${DEVICE:-auto}
-CPU_THREADS=${CPU_THREADS:-6}
-GPU_MEMORY_FRACTION=${GPU_MEMORY_FRACTION:-0.25}
+BATCH_SIZE=${BATCH_SIZE:-8}
+EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-16}
+WORKERS=${WORKERS:-4}
+DEVICE=${DEVICE:-cuda}
+CPU_THREADS=${CPU_THREADS:-8}
+GPU_MEMORY_FRACTION=${GPU_MEMORY_FRACTION:-0.90}
 IMAGE_NORMALIZATION=${IMAGE_NORMALIZATION:-imagenet}
-VAL_EVERY=${VAL_EVERY:-2}
+VAL_EVERY=${VAL_EVERY:-10}
 SEED=${SEED:-0}
 AMP=${AMP:-1}
 NICE_LEVEL=${NICE_LEVEL:-0}
-LR=${LR:-2e-4}
+LR=${LR:-4e-4}
 CALIBRATION_FRACTION=${CALIBRATION_FRACTION:-0.10}
 SPLIT_MANIFEST=${SPLIT_MANIFEST:-}
 DISTILL_EPOCHS=${DISTILL_EPOCHS:-$EPOCHS}
-DISTILL_BATCH_SIZE=${DISTILL_BATCH_SIZE:-4}
+DISTILL_BATCH_SIZE=${DISTILL_BATCH_SIZE:-8}
 DISTILL_LR=${DISTILL_LR:-1e-3}
-DISTILL_VAL_EVERY=${DISTILL_VAL_EVERY:-2}
+DISTILL_VAL_EVERY=${DISTILL_VAL_EVERY:-10}
 BN_CALIBRATION_PASSES=${BN_CALIBRATION_PASSES:-1}
 RUN_HEAD_DISTILLATION=${RUN_HEAD_DISTILLATION:-1}
 OUTPUT_DISTILL_EPOCHS=${OUTPUT_DISTILL_EPOCHS:-$EPOCHS}
@@ -35,7 +36,25 @@ export OMP_NUM_THREADS="$CPU_THREADS"
 export MKL_NUM_THREADS="$CPU_THREADS"
 export OPENBLAS_NUM_THREADS="$CPU_THREADS"
 export NUMEXPR_NUM_THREADS="$CPU_THREADS"
+export PYTHONUNBUFFERED=1
 export PYTORCH_ENABLE_MPS_FALLBACK=1
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
+if [ "$DEVICE" = "cuda" ]; then
+  "$PYTHON_BIN" - <<'PY'
+import torch
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "CUDA is unavailable. Check the NVIDIA driver and install a CUDA "
+        "PyTorch wheel before running this script."
+    )
+properties = torch.cuda.get_device_properties(0)
+print(
+    f"[preflight] CUDA available: {properties.name}; "
+    f"memory={properties.total_memory / 1024**3:.1f} GB"
+)
+PY
+fi
 
 # Prevent accidental duplicate benchmark runs with a portable mkdir lock.
 # macOS does not ship flock(1).
@@ -84,7 +103,7 @@ if [ -z "$SPLIT_MANIFEST" ]; then
   SPLIT_MANIFEST="$RUN_DIR/calibration_split.json"
 fi
 if [ ! -f "$SPLIT_MANIFEST" ]; then
-  run_benchmark python make_calibration_split.py \
+  run_benchmark "$PYTHON_BIN" make_calibration_split.py \
     --data_root "$DATA_ROOT" --out "$SPLIT_MANIFEST" \
     --fraction "$CALIBRATION_FRACTION"
 else
@@ -101,14 +120,14 @@ COMMON=(--data_root "$DATA_ROOT" --out_dir "$RUN_DIR" --epochs "$EPOCHS" \
 echo "[benchmark] device=$DEVICE normalization=$IMAGE_NORMALIZATION batch=$BATCH_SIZE workers=$WORKERS cpu_threads=$CPU_THREADS amp=$AMP val_every=$VAL_EVERY"
 echo "[benchmark] tasks are strictly sequential; output=$RUN_DIR"
 
-run_benchmark python train.py --mode stl --task segmentation "${COMMON[@]}"
-run_benchmark python train.py --mode stl --task depth        "${COMMON[@]}"
-run_benchmark python train.py --mode stl --task normal       "${COMMON[@]}"
-run_benchmark python train.py --mode mtl                     "${COMMON[@]}"
+run_benchmark "$PYTHON_BIN" train.py --mode stl --task segmentation "${COMMON[@]}"
+run_benchmark "$PYTHON_BIN" train.py --mode stl --task depth        "${COMMON[@]}"
+run_benchmark "$PYTHON_BIN" train.py --mode stl --task normal       "${COMMON[@]}"
+run_benchmark "$PYTHON_BIN" train.py --mode mtl                     "${COMMON[@]}"
 
-run_benchmark python merge_average.py --run_dir "$RUN_DIR" --out "$RUN_DIR/merged_average.pth"
+run_benchmark "$PYTHON_BIN" merge_average.py --run_dir "$RUN_DIR" --out "$RUN_DIR/merged_average.pth"
 if [ "$RUN_HEAD_DISTILLATION" = "1" ]; then
-  run_benchmark python distill_heads.py \
+  run_benchmark "$PYTHON_BIN" distill_heads.py \
     --data_root "$DATA_ROOT" --run_dir "$RUN_DIR" \
     --split_manifest "$SPLIT_MANIFEST" \
     --merged "$RUN_DIR/merged_average.pth" \
@@ -120,7 +139,7 @@ if [ "$RUN_HEAD_DISTILLATION" = "1" ]; then
     --gpu_memory_fraction "$GPU_MEMORY_FRACTION" \
     --image_normalization "$IMAGE_NORMALIZATION" "${AMP_ARGS[@]}"
 fi
-run_benchmark python distill_heads.py \
+run_benchmark "$PYTHON_BIN" distill_heads.py \
   --data_root "$DATA_ROOT" --run_dir "$RUN_DIR" \
   --split_manifest "$SPLIT_MANIFEST" \
   --merged "$RUN_DIR/merged_average.pth" \
@@ -134,7 +153,7 @@ run_benchmark python distill_heads.py \
   --device "$DEVICE" --cpu_threads "$CPU_THREADS" \
   --gpu_memory_fraction "$GPU_MEMORY_FRACTION" \
   --image_normalization "$IMAGE_NORMALIZATION" "${AMP_ARGS[@]}"
-run_benchmark python distill_heads.py \
+run_benchmark "$PYTHON_BIN" distill_heads.py \
   --data_root "$DATA_ROOT" --run_dir "$RUN_DIR" \
   --split_manifest "$SPLIT_MANIFEST" \
   --merged "$RUN_DIR/merged_average.pth" \
@@ -149,7 +168,7 @@ run_benchmark python distill_heads.py \
   --device "$DEVICE" --cpu_threads "$CPU_THREADS" \
   --gpu_memory_fraction "$GPU_MEMORY_FRACTION" \
   --image_normalization "$IMAGE_NORMALIZATION" "${AMP_ARGS[@]}"
-run_benchmark python evaluate.py --data_root "$DATA_ROOT" --run_dir "$RUN_DIR" \
+run_benchmark "$PYTHON_BIN" evaluate.py --data_root "$DATA_ROOT" --run_dir "$RUN_DIR" \
   --merged "$RUN_DIR/merged_average.pth" --csv "$RUN_DIR/benchmark_results.csv" \
   --output_distilled "$RUN_DIR/merged_output_distilled.pth" \
   --intermediate_distilled "$RUN_DIR/merged_intermediate_distilled.pth" \

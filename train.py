@@ -8,6 +8,7 @@ from runtime import (
     autocast_context,
     configure_device,
     device_memory_gb,
+    make_grad_scaler,
     release_accelerator_cache,
     seed_device,
     shutdown_loader,
@@ -169,21 +170,21 @@ def main():
         help="JSON split containing train_pool and val index lists."
     )
     p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--workers", type=int, default=0)
+    p.add_argument("--batch_size", type=int, default=8)
+    p.add_argument("--workers", type=int, default=4)
     p.add_argument(
-        "--lr", type=float, default=2e-4,
+        "--lr", type=float, default=4e-4,
         help="Learning rate. The default is scaled linearly from 1e-4 at batch 2."
     )
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
-        "--device", choices=["cpu", "mps", "cuda", "auto"], default="auto",
-        help="auto prefers Apple MPS, then CUDA, then CPU."
+        "--device", choices=["cpu", "mps", "cuda", "auto"], default="cuda",
+        help="cuda enables NVIDIA GPU execution; auto prefers CUDA, then MPS, then CPU."
     )
-    p.add_argument("--cpu_threads", type=int, default=6)
+    p.add_argument("--cpu_threads", type=int, default=8)
     p.add_argument(
-        "--gpu_memory_fraction", type=float, default=0.25,
+        "--gpu_memory_fraction", type=float, default=0.90,
         help="PyTorch CUDA allocator cap; ignored on CPU and MPS."
     )
     p.add_argument(
@@ -193,10 +194,10 @@ def main():
     )
     p.add_argument(
         "--amp", action=argparse.BooleanOptionalAction, default=True,
-        help="Use FP16 autocast on MPS."
+        help="Use FP16 autocast and CUDA GradScaler on NVIDIA GPUs."
     )
     p.add_argument(
-        "--val_every", type=int, default=2,
+        "--val_every", type=int, default=10,
         help="Validate every N epochs; the first and final epochs always validate."
     )
     p.add_argument(
@@ -215,7 +216,7 @@ def main():
     )
     if args.val_every < 1:
         p.error("--val_every must be at least 1")
-    use_amp = args.amp and device.type == "mps"
+    use_amp = args.amp and device.type in ("cuda", "mps")
     print(
         f"[resource] device={device}; workers={args.workers}; "
         f"batch_size={args.batch_size}; amp={use_amp}; val_every={args.val_every}"
@@ -248,6 +249,7 @@ def main():
     if args.workers > 0:
         loader_options = {
             "prefetch_factor": 4,
+            "persistent_workers": True,
         }
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True,
@@ -270,6 +272,7 @@ def main():
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    scaler = make_grad_scaler(device, use_amp)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=max(args.epochs // 3, 1), gamma=0.5
     )
@@ -299,8 +302,9 @@ def main():
             loss = torch.stack(losses).mean()
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             loss_value = loss.detach().item()
             running_loss += loss_value * image.size(0)

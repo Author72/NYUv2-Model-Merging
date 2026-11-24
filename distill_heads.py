@@ -16,6 +16,7 @@ from runtime import (
     autocast_context,
     configure_device,
     device_memory_gb,
+    make_grad_scaler,
     release_accelerator_cache,
     seed_device,
     shutdown_loader,
@@ -288,7 +289,7 @@ def main():
     parser.add_argument("--merged", default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--temperature", type=float, default=2.0)
@@ -313,12 +314,12 @@ def main():
         default=True
     )
     parser.add_argument("--bn_calibration_passes", type=int, default=1)
-    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
-        "--device", choices=["cpu", "mps", "cuda", "auto"], default="auto"
+        "--device", choices=["cpu", "mps", "cuda", "auto"], default="cuda"
     )
-    parser.add_argument("--cpu_threads", type=int, default=6)
-    parser.add_argument("--gpu_memory_fraction", type=float, default=0.25)
+    parser.add_argument("--cpu_threads", type=int, default=8)
+    parser.add_argument("--gpu_memory_fraction", type=float, default=0.90)
     parser.add_argument(
         "--image_normalization", choices=["imagenet", "none"],
         default="imagenet"
@@ -340,7 +341,7 @@ def main():
     device = configure_device(
         args.device, args.cpu_threads, args.gpu_memory_fraction
     )
-    use_amp = args.amp and device.type == "mps"
+    use_amp = args.amp and device.type in ("cuda", "mps")
     if args.method_name:
         method_name = args.method_name
     elif args.train_scope == "encoder_heads":
@@ -406,6 +407,9 @@ def main():
         dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers,
         generator=torch.Generator().manual_seed(args.seed),
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=args.workers > 0,
+        prefetch_factor=4 if args.workers > 0 else None,
     )
     val_dataset = NYUv2(
         args.data_root, "val",
@@ -415,6 +419,9 @@ def main():
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers,
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=args.workers > 0,
+        prefetch_factor=4 if args.workers > 0 else None,
     )
     parameter_groups = [{
         "params": list(student.heads.parameters()),
@@ -436,6 +443,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs
     )
+    scaler = make_grad_scaler(device, use_amp)
     best_objective = float("inf")
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
@@ -503,7 +511,8 @@ def main():
                 )
             )
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 [
                     parameter
@@ -512,7 +521,8 @@ def main():
                 ],
                 max_norm=1.0,
             )
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             for task in TASKS:
                 running[task] += losses[task].detach().item()
             batches += 1
