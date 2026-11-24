@@ -23,7 +23,7 @@ def is_mps_available():
 def get_device(device_arg):
     if device_arg == "auto":
         if torch.cuda.is_available():
-            return torch.device("cuda")
+            return torch.device("cuda", torch.cuda.current_device())
         if is_mps_available():
             return torch.device("mps")
         return torch.device("cpu")
@@ -40,6 +40,9 @@ def get_device(device_arg):
             "CUDA_VISIBLE_DEVICES, and that the installed PyTorch wheel is a "
             "CUDA build."
         )
+    if device_arg == "cuda":
+        # PyTorch's per-process allocator API requires an explicit index.
+        return torch.device("cuda", torch.cuda.current_device())
     return torch.device(device_arg)
 
 
@@ -56,8 +59,16 @@ def configure_device(device_arg, cpu_threads, gpu_memory_fraction):
     if device.type == "cuda":
         if not (0.05 <= gpu_memory_fraction <= 1.0):
             raise ValueError("--gpu_memory_fraction must be between 0.05 and 1.0")
-        torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction, device)
-        properties = torch.cuda.get_device_properties(device)
+        cuda_index = (
+            device.index
+            if device.index is not None
+            else torch.cuda.current_device()
+        )
+        device = torch.device("cuda", cuda_index)
+        torch.cuda.set_per_process_memory_fraction(
+            gpu_memory_fraction, cuda_index
+        )
+        properties = torch.cuda.get_device_properties(cuda_index)
         print(
             f"[resource] NVIDIA CUDA device={properties.name}; "
             f"capability={properties.major}.{properties.minor}; "
