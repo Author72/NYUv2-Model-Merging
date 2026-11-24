@@ -31,12 +31,35 @@ def tail_text(path, limit=80):
     return "\n".join(lines[-limit:])
 
 
-def run_stage(name, script, script_args, logs_dir, marker_dir, env, resume):
+def run_stage(
+    name, script, script_args, logs_dir, marker_dir, env, resume,
+    required_paths=(), reuse_existing=False,
+):
     logs_dir.mkdir(parents=True, exist_ok=True)
     marker_dir.mkdir(parents=True, exist_ok=True)
     marker = marker_dir / f"{name}.json"
     if resume and marker.is_file():
         print(f"[suite] skip completed stage: {name}", flush=True)
+        return
+    if (
+        resume
+        and reuse_existing
+        and required_paths
+        and all(path.is_file() and path.stat().st_size > 0 for path in required_paths)
+    ):
+        marker.write_text(
+            json.dumps({
+                "stage": name,
+                "reused_existing": True,
+                "required_paths": [str(path) for path in required_paths],
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            f"[suite] reuse existing checkpoint for stage: {name}",
+            flush=True,
+        )
         return
 
     log_path = logs_dir / f"{name}.log"
@@ -117,6 +140,15 @@ def main():
         "--resume", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument(
+        "--reuse_existing_checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Treat an existing stage output as complete even if its completion "
+            "marker is absent."
+        ),
+    )
+    parser.add_argument(
         "--dry_run", action=argparse.BooleanOptionalAction, default=False
     )
     args = parser.parse_args()
@@ -152,6 +184,7 @@ def main():
         "amp": args.amp,
         "amp_dtype": "float16" if args.amp else None,
         "gpu_memory_fraction": args.gpu_memory_fraction,
+        "reuse_existing_checkpoints": args.reuse_existing_checkpoints,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "distillation_protocol": (
             "No calibration labels and no BN recalibration; output KD for "
@@ -215,6 +248,32 @@ def main():
             "--out_dir", str(seed_dir),
             "--seed", str(seed),
         ]
+        stage_outputs = {
+            "01_stl_segmentation": [
+                seed_dir / "stl_segmentation" / "best.pth",
+            ],
+            "02_stl_depth": [
+                seed_dir / "stl_depth" / "best.pth",
+            ],
+            "03_stl_normal": [
+                seed_dir / "stl_normal" / "best.pth",
+            ],
+            "04_mtl": [
+                seed_dir / "mtl" / "best.pth",
+            ],
+            "05_encoder_average": [
+                seed_dir / "merged_average.pth",
+            ],
+            "06_output_distillation": [
+                seed_dir / "merged_output_distilled.pth",
+            ],
+            "07_intermediate_output_distillation": [
+                seed_dir / "merged_intermediate_distilled.pth",
+            ],
+            "08_evaluate_five_methods": [
+                seed_dir / "benchmark_results.csv",
+            ],
+        }
         stages = [
             (
                 "01_stl_segmentation",
@@ -349,6 +408,8 @@ def main():
                 marker_dir,
                 env,
                 args.resume,
+                required_paths=stage_outputs.get(stage_name, ()),
+                reuse_existing=args.reuse_existing_checkpoints,
             )
 
     if args.dry_run:

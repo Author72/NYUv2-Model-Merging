@@ -124,6 +124,8 @@ initialization.
 # Three randomly sampled seeds; override SEEDS to repeat another sample.
 CUDA_VISIBLE_DEVICES=0 \
 SEEDS=8394,4197,9424 \
+GPU_MEMORY_LIMIT_GB=9.5 \
+REUSE_EXISTING=1 \
 bash run_nvidia_three_seed.sh \
   /data/nyuv2 ./runs_nvidia_three_seed_100ep
 ```
@@ -131,15 +133,19 @@ bash run_nvidia_three_seed.sh \
 The wrapper checks CUDA before starting, then calls:
 
 ```bash
+GPU_MEMORY_FRACTION=$(
+  python -c "import torch; print(min(1.0, 9.5 / (torch.cuda.get_device_properties(0).total_memory / 1024**3)))"
+)
 python run_three_seed_benchmark.py \
   --data_root /data/nyuv2 \
   --output_root ./runs_nvidia_three_seed_100ep \
   --seeds 8394,4197,9424 \
   --epochs 100 --distill_epochs 100 \
-  --batch_size 8 --eval_batch_size 16 \
+  --batch_size 4 --eval_batch_size 8 --lr 2e-4 \
   --workers 4 --cpu_threads 8 \
-  --gpu_memory_fraction 0.90 \
-  --device cuda --amp
+  --gpu_memory_fraction "$GPU_MEMORY_FRACTION" \
+  --device cuda --amp \
+  --reuse_existing_checkpoints
 ```
 
 Generate a new random seed set with:
@@ -152,6 +158,65 @@ The seeds in this command were randomly sampled from `1..9999` with
 `secrets.SystemRandom`. Each seed is written to its own subdirectory. Stage
 logs and completion markers allow an interrupted suite to resume without
 retraining completed stages.
+
+`GPU_MEMORY_LIMIT_GB=9.5` caps PyTorch's caching allocator below 10 GiB and
+leaves roughly 0.5 GiB for CUDA context and driver overhead. The wrapper
+computes the correct fraction from the selected GPU's total memory, and uses
+batch size 4 plus learning rate `2e-4` by default. `CUDA_VISIBLE_DEVICES=0`
+restricts the process to GPU 0.
+
+`REUSE_EXISTING=1` skips a stage when its expected output already exists even
+if the `.completed` marker is missing. Expected outputs are:
+
+```text
+seed_<seed>/stl_segmentation/best.pth
+seed_<seed>/stl_depth/best.pth
+seed_<seed>/stl_normal/best.pth
+seed_<seed>/mtl/best.pth
+seed_<seed>/merged_average.pth
+seed_<seed>/merged_output_distilled.pth
+seed_<seed>/merged_intermediate_distilled.pth
+seed_<seed>/benchmark_results.csv
+```
+
+The runner therefore reuses completed expert/MTL checkpoints and continues
+with any missing averaging, distillation, and evaluation stages. It does not
+resume optimizer state in the middle of an unfinished training epoch; an
+existing `best.pth` is reused as the trained model for that stage.
+
+### Run after disconnecting SSH
+
+Use `tmux` so the process survives an SSH disconnect:
+
+```bash
+tmux new -s nyuv2
+cd /path/to/NYUv2-Model-Merging
+
+CUDA_VISIBLE_DEVICES=0 \
+GPU_MEMORY_LIMIT_GB=9.5 \
+REUSE_EXISTING=1 \
+bash run_nvidia_three_seed.sh \
+  /data/nyuv2 ./runs_nvidia_three_seed_100ep \
+  2>&1 | tee nyuv2_training.log
+```
+
+Detach with `Ctrl+b`, then `d`. Reattach tomorrow with:
+
+```bash
+tmux attach -t nyuv2
+```
+
+If `tmux` is unavailable, use `nohup` and `setsid`:
+
+```bash
+setsid nohup env \
+  CUDA_VISIBLE_DEVICES=0 \
+  GPU_MEMORY_LIMIT_GB=9.5 \
+  REUSE_EXISTING=1 \
+  bash run_nvidia_three_seed.sh \
+  /data/nyuv2 ./runs_nvidia_three_seed_100ep \
+  > nyuv2_training.log 2>&1 < /dev/null &
+```
 
 The two distillation methods use calibration images but no calibration labels.
 They do not recalibrate BN statistics, which keeps the comparison focused on
